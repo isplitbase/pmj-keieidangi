@@ -4,3 +4,4 @@ anthropic>=0.39
 openai>=1.50
 google-genai>=1.0
 requests>=2.31
+openpyxl>=3.1

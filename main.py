@@ -16,9 +16,13 @@ APIキーは環境変数で渡す(Cloud Runの環境変数/Secret):
 """
 from __future__ import annotations
 import os, re, threading
-from flask import Flask, request, jsonify
+from io import BytesIO
+from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_PATH = os.path.join(BASE_DIR, "keiei_template.xlsm")
 
 # ---- トーン --------------------------------------------------------------
 TONE_INSTRUCTIONS = {
@@ -312,6 +316,61 @@ def summarize_route():
     except Exception as e:
         return jsonify({"status": "NG", "error": str(e)[:300], "provider": chosen}), 200
     return jsonify({"status": "OK", "provider": chosen, "sections": split_summary(text)})
+
+
+# ---- Excel 生成 (報告書(現)に入力セルのみ書き込み・数式は残す) ------------
+EXCEL_SHEET = "報告書（現）"
+# テンプレートの「入力セル」がある行(数式行は書き込まない)
+EXCEL_INPUT_ROWS = {9, 12, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 38}
+
+@app.post("/excel")
+def excel_route():
+    body = request.get_json(silent=True) or {}
+    data = body.get("report") or {}
+    si = data.get("store_info") or {}
+    fin = data.get("financials") or {}
+    h = fin.get("headers") or {}
+    if not fin.get("rows"):
+        return jsonify({"status": "NG", "error": "report.financials.rows がありません"}), 400
+
+    import openpyxl
+    wb = openpyxl.load_workbook(TEMPLATE_PATH, data_only=False, keep_vba=True)
+    ws = wb[EXCEL_SHEET]
+
+    # ヘッダー
+    sc = si.get("store_code")
+    if sc is not None and str(sc).isdigit():
+        sc = int(sc)
+    ws["D4"] = sc
+    ws["D5"] = si.get("store_name")
+    ws["X5"] = si.get("office")
+    ws["X6"] = si.get("person_in_charge")
+    # 決算年
+    ws["E7"] = h.get("year_current")
+    ws["G7"] = h.get("year_previous")
+    ws["K7"] = h.get("year_previous2")
+    # 入力セルのみ(数式行はスキップ→Excelで再計算)
+    for r in fin.get("rows", []):
+        rn = r.get("row")
+        if rn not in EXCEL_INPUT_ROWS:
+            continue
+        if r.get("v_curr") not in (None, ""):
+            ws["E%d" % rn] = r.get("v_curr")
+        if r.get("v_prev") not in (None, ""):
+            ws["G%d" % rn] = r.get("v_prev")
+        if r.get("v_prev2") not in (None, ""):
+            ws["K%d" % rn] = r.get("v_prev2")
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    # ファイル名(Disposition)は呼出側(.do)で付与する想定。ここは本文のみ返す。
+    return send_file(
+        bio,
+        mimetype="application/vnd.ms-excel.sheet.macroEnabled.12",
+        as_attachment=False,
+        download_name="keieidangi.xlsm",
+    )
 
 
 if __name__ == "__main__":
