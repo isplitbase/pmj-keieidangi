@@ -203,5 +203,96 @@ def analyze_route():
     results = analyze(data, tone, providers)
     return jsonify({"status": "OK", "tone": tone, "providers": providers, "results": results})
 
+# ---- AI自動要約 (複数AIの分析を比較・検証) -----------------------------
+PROVIDER_LABEL = {"claude": "Claude", "gemini": "Gemini", "openai": "OpenAI"}
+SEC_LABELS = {
+    "REPORT": "経営談義報告書",
+    "SALES_ISSUE": "販売-課題", "SALES_PROPOSAL": "販売-提案",
+    "INCOME_ISSUE": "収支-課題", "INCOME_PROPOSAL": "収支-提案",
+    "CAPITAL_ISSUE": "資金-課題", "CAPITAL_PROPOSAL": "資金-提案",
+}
+SUMMARY_ORDER = ["claude", "openai", "gemini"]  # 要約担当の優先順
+
+def _has_key(p):
+    if p == "claude":
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if p == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    if p == "gemini":
+        return bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"))
+    return False
+
+def _format_results(results):
+    """各AIの分析テキストを読みやすいブロックに整形(存在するAIのみ)。"""
+    blocks = []
+    for p in SUMMARY_ORDER:
+        r = (results or {}).get(p)
+        if not r:
+            continue
+        if r.get("error"):
+            blocks.append("=== %s の分析: エラー(%s) ===" % (PROVIDER_LABEL.get(p, p), r.get("error")))
+            continue
+        sec = r.get("sections") or {}
+        lines = ["=== %s の分析 ===" % PROVIDER_LABEL.get(p, p)]
+        for key in SECTION_NAMES:
+            v = sec.get(key)
+            if v:
+                lines.append("【%s】\n%s" % (SEC_LABELS.get(key, key), v))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+def build_summary_prompt(data, results, tone):
+    aliases = {"mild": "plain", "normal": "expert", "strict": "expert"}
+    tone = aliases.get(tone, tone)
+    tone = tone if tone in TONE_INSTRUCTIONS else "expert"
+    fin = _format_financial(data)
+    analyses = _format_results(results)
+    return (
+        "あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。\n"
+        "同じ財務データに対して各AIが作成した『経営分析』を比較・検証し、日本語で下記2部構成でまとめてください。\n"
+        "（分析が存在するAIのみを対象にすること。AIは1〜3個のいずれの場合もある）\n\n"
+        "【表現ルール — 100%遵守すること】\n"
+        + TONE_INSTRUCTIONS[tone] + "\n\n"
+        "【出力フォーマット (厳守)】\n"
+        "■総合要約\n"
+        "(各AIの分析を踏まえた、この企業の財務状況・経営課題の総合的な要約。重要点を簡潔に。)\n\n"
+        "■各AIの結論の問題点\n"
+        "(分析があるAIごとに、結論や指摘の誤り・根拠の薄さ・数値の誤読・見落とし・AI間の矛盾などを箇条書きで指摘。\n"
+        " 問題が無ければ『特になし』。例:\n"
+        " ・Claude: ...\n ・Gemini: ...\n ・OpenAI: ...)\n\n"
+        "【財務データ】\n" + fin + "\n\n"
+        "【各AIの分析】\n" + analyses + "\n"
+    )
+
+@app.post("/summarize")
+def summarize_route():
+    body = request.get_json(silent=True) or {}
+    data = body.get("report") or {}
+    results = body.get("results") or {}
+    tone = body.get("tone", "expert")
+    if tone not in TONE_INSTRUCTIONS:
+        tone = "expert"
+    if not results:
+        return jsonify({"status": "NG", "error": "results(各AIの分析)がありません"}), 400
+
+    # 要約担当AIを選定: SUMMARY_PROVIDER 指定 → 無ければキーのある先頭
+    pref = (os.environ.get("SUMMARY_PROVIDER", "") or "").strip().lower()
+    order = ([pref] if pref in PROVIDERS else []) + [p for p in SUMMARY_ORDER if p != pref]
+    chosen = None
+    for p in order:
+        if _has_key(p):
+            chosen = p
+            break
+    if not chosen:
+        return jsonify({"status": "NG", "error": "要約用のAPIキーが未設定です"}), 200
+
+    prompt = build_summary_prompt(data, results, tone)
+    try:
+        text = PROVIDERS[chosen](prompt)
+    except Exception as e:
+        return jsonify({"status": "NG", "error": str(e)[:300], "provider": chosen}), 200
+    return jsonify({"status": "OK", "provider": chosen, "summary": text})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
