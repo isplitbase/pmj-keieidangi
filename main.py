@@ -241,6 +241,24 @@ def _format_results(results):
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
+SUMMARY_SECTIONS = ["SUM_REPORT", "SUM_SALES", "SUM_INCOME", "SUM_CAPITAL"]
+SUMMARY_MARKER_RE = re.compile(r"===\s*(" + "|".join(SUMMARY_SECTIONS) + r")\s*===")
+SUMMARY_KEYMAP = {"SUM_REPORT": "REPORT", "SUM_SALES": "SALES", "SUM_INCOME": "INCOME", "SUM_CAPITAL": "CAPITAL"}
+
+def split_summary(text):
+    out = {"REPORT": "", "SALES": "", "INCOME": "", "CAPITAL": ""}
+    if not text:
+        return out
+    matches = list(SUMMARY_MARKER_RE.finditer(text))
+    if not matches:
+        out["REPORT"] = text.strip()
+        return out
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out[SUMMARY_KEYMAP[m.group(1)]] = text[start:end].strip()
+    return out
+
 def build_summary_prompt(data, results, tone):
     aliases = {"mild": "plain", "normal": "expert", "strict": "expert"}
     tone = aliases.get(tone, tone)
@@ -249,17 +267,19 @@ def build_summary_prompt(data, results, tone):
     analyses = _format_results(results)
     return (
         "あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。\n"
-        "同じ財務データに対して各AIが作成した『経営分析』を比較・検証し、日本語で下記2部構成でまとめてください。\n"
-        "（分析が存在するAIのみを対象にすること。AIは1〜3個のいずれの場合もある）\n\n"
+        "同じ財務データに対して各AIが作成した『経営分析』を比較・検証し、\n"
+        "『経営談義報告書』『販売』『収支』『資金』の4区分それぞれについて、\n"
+        "(1)各AIを踏まえた要約 と (2)各AIの結論の問題点 を日本語でまとめてください。\n"
+        "（分析が存在するAIのみを対象。AIは1〜3個のいずれの場合もある）\n\n"
         "【表現ルール — 100%遵守すること】\n"
         + TONE_INSTRUCTIONS[tone] + "\n\n"
         "【出力フォーマット (厳守)】\n"
-        "■総合要約\n"
-        "(各AIの分析を踏まえた、この企業の財務状況・経営課題の総合的な要約。重要点を簡潔に。)\n\n"
-        "■各AIの結論の問題点\n"
-        "(分析があるAIごとに、結論や指摘の誤り・根拠の薄さ・数値の誤読・見落とし・AI間の矛盾などを箇条書きで指摘。\n"
-        " 問題が無ければ『特になし』。例:\n"
-        " ・Claude: ...\n ・Gemini: ...\n ・OpenAI: ...)\n\n"
+        "必ず下記4マーカー形式で出力。各区分内で『要約』と『各AIの問題点(誤り・根拠薄・数値誤読・見落とし・AI間矛盾。無ければ特になし)』を書く。\n"
+        "余計な前置きは不要。マーカーは半角英大文字のみ。\n\n"
+        "===SUM_REPORT===\n(経営談義報告書(全体)の要約＋各AIの問題点)\n\n"
+        "===SUM_SALES===\n(販売の要約＋各AIの問題点)\n\n"
+        "===SUM_INCOME===\n(収支の要約＋各AIの問題点)\n\n"
+        "===SUM_CAPITAL===\n(資金の要約＋各AIの問題点)\n\n"
         "【財務データ】\n" + fin + "\n\n"
         "【各AIの分析】\n" + analyses + "\n"
     )
@@ -291,7 +311,7 @@ def summarize_route():
         text = PROVIDERS[chosen](prompt)
     except Exception as e:
         return jsonify({"status": "NG", "error": str(e)[:300], "provider": chosen}), 200
-    return jsonify({"status": "OK", "provider": chosen, "summary": text})
+    return jsonify({"status": "OK", "provider": chosen, "sections": split_summary(text)})
 
 
 if __name__ == "__main__":
