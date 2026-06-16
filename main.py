@@ -340,8 +340,9 @@ def _est_lines(text, width):
         total += max(1, -(-dl // max(1, int(width))))
     return max(1, total)
 
-def build_ai_sheet(wb, results):
+def build_ai_sheet(wb, results, layout="landscape"):
     """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
+       layout: "landscape"(横3列並列) / "portrait"(縦・各AIを全幅で縦積み・AIごと改ページ)
        results が 1〜3個でも 0個でもエラーにしない。要約は貼らない。"""
     results = results or {}
     provs = [p for p in AI_SHEET_PROVS
@@ -352,6 +353,7 @@ def build_ai_sheet(wb, results):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.worksheet.pagebreak import Break
 
     FONT = "Yu Gothic"
     def _fill(c):
@@ -363,12 +365,59 @@ def build_ai_sheet(wb, results):
 
     ws = wb["AI診断"] if "AI診断" in wb.sheetnames else wb.create_sheet("AI診断")
 
-    # A4・横向き・幅を1ページに収めて印刷
-    ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = 9  # A4
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+    # ============ 縦向き・縦積み(各AIを全幅、AIごとに改ページ) ============
+    if layout == "portrait":
+        ws.page_setup.orientation = "portrait"
+        ws.page_margins.left = ws.page_margins.right = 0.4
+        ws.page_margins.top = ws.page_margins.bottom = 0.5
+        COLW = 95
+        COL = 2  # B列(全幅)
+        ws.column_dimensions["A"].width = 2
+        ws.column_dimensions[get_column_letter(COL)].width = COLW
+        st = {"r": 1}
+
+        def put(text, bg, fg, white=False, bold=True, size=10, wrap=False, h=18, center=False):
+            r = st["r"]
+            c = ws.cell(r, COL, text)
+            c.fill = _fill(bg)
+            c.font = _font(color=(fg or "2B2F33"), bold=bold, size=size, white=white)
+            if wrap:
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.row_dimensions[r].height = min(680, _est_lines(text, COLW) * 15 + 6)
+            else:
+                c.alignment = Alignment(vertical="center", horizontal=("center" if center else "left"))
+                ws.row_dimensions[r].height = h
+            c.border = border
+            st["r"] = r + 1
+
+        first = True
+        for p in provs:
+            if not first:
+                ws.row_dimensions[st["r"]].height = 8  # 余白
+                st["r"] += 1
+                ws.row_breaks.append(Break(id=st["r"] - 1))  # 新AIはページ先頭から
+            first = False
+            name, clr = AI_SHEET_HDR[p]
+            sec = results[p].get("sections") or {}
+            put(name, clr, None, white=True, bold=True, size=14, h=26, center=True)
+            put("経営談義報告書", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
+            put(sec.get("REPORT", "") or "", "FFF8E1", None, bold=False, wrap=True)
+            for key, title in AI_SHEET_CATS:
+                put(title, "0A66C2", None, white=True, bold=True, size=11, h=20)
+                put("課題", "FDF6F6", "B42318", bold=True, size=10, h=15)
+                put(sec.get(key + "_ISSUE", "") or "", "FDF6F6", None, bold=False, wrap=True)
+                put("提案", "F2FBF3", "1A7F37", bold=True, size=10, h=15)
+                put(sec.get(key + "_PROPOSAL", "") or "", "F2FBF3", None, bold=False, wrap=True)
+        ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
+        return
+
+    # ============ 横向き・3列並列 ============
+    ws.page_setup.orientation = "landscape"
     ws.page_margins.left = ws.page_margins.right = 0.3
     ws.page_margins.top = ws.page_margins.bottom = 0.4
 
@@ -405,7 +454,6 @@ def build_ai_sheet(wb, results):
         ws.row_dimensions[r].height = min(640, maxlines * 15 + 6)
         state["r"] = r + 1
 
-    # ヘッダー(プロバイダ名・色付き)
     r = state["r"]
     for i, p in enumerate(provs):
         name, clr = AI_SHEET_HDR[p]
@@ -417,10 +465,8 @@ def build_ai_sheet(wb, results):
     ws.row_dimensions[r].height = 22
     state["r"] = r + 1
 
-    # 経営談義報告書(クリーム)
     label_row("経営談義報告書", "FFF8E1", "8D6E00", h=16)
     text_row("REPORT", "FFF8E1")
-    # 販売/収支/資金
     for key, title in AI_SHEET_CATS:
         label_row(title, "0A66C2", None, white=True, h=18)
         label_row("課題", "FDF6F6", "B42318", h=15)
@@ -470,7 +516,10 @@ def excel_route():
             ws["K%d" % rn] = r.get("v_prev2")
 
     # AI診断シート(3AI分析を貼る。1〜3個でもエラーにしない。要約は貼らない)
-    build_ai_sheet(wb, body.get("results"))
+    layout = body.get("layout")
+    if layout not in ("portrait", "landscape"):
+        layout = "portrait"  # 既定: 縦向き・縦積み
+    build_ai_sheet(wb, body.get("results"), layout)
 
     bio = BytesIO()
     wb.save(bio)
