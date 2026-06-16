@@ -323,6 +323,114 @@ EXCEL_SHEET = "報告書（現）"
 # テンプレートの「入力セル」がある行(数式行は書き込まない)
 EXCEL_INPUT_ROWS = {9, 12, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 38}
 
+# ---- AI診断シート (3AI分析を画面の配色で貼る。A4印刷・1〜3個対応・編集可) ----
+AI_SHEET_PROVS = ["claude", "gemini", "openai"]
+AI_SHEET_HDR = {"claude": ("Claude", "D77655"), "gemini": ("Gemini", "1A73E8"), "openai": ("OpenAI", "10A37F")}
+AI_SHEET_CATS = [("SALES", "販売"), ("INCOME", "収支"), ("CAPITAL", "資金")]
+
+def _est_lines(text, width):
+    """セル幅(width)に対するおおよその行数(日本語は全角=2幅でカウント)。"""
+    if not text:
+        return 1
+    total = 0
+    for line in str(text).split("\n"):
+        dl = 0
+        for ch in line:
+            dl += 2 if ord(ch) > 0x2E80 else 1
+        total += max(1, -(-dl // max(1, int(width))))
+    return max(1, total)
+
+def build_ai_sheet(wb, results):
+    """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
+       results が 1〜3個でも 0個でもエラーにしない。要約は貼らない。"""
+    results = results or {}
+    provs = [p for p in AI_SHEET_PROVS
+             if isinstance(results.get(p), dict) and results[p].get("sections")]
+    if not provs:
+        return  # AI分析結果が無ければシートは触らない
+
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    FONT = "Yu Gothic"
+    def _fill(c):
+        return PatternFill("solid", fgColor=c)
+    def _font(color="2B2F33", bold=False, size=10, white=False):
+        return Font(name=FONT, size=size, bold=bold, color=("FFFFFF" if white else color))
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws = wb["AI診断"] if "AI診断" in wb.sheetnames else wb.create_sheet("AI診断")
+
+    # A4・横向き・幅を1ページに収めて印刷
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = 9  # A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.3
+    ws.page_margins.top = ws.page_margins.bottom = 0.4
+
+    COLW = 46
+    start_col = 2
+    ws.column_dimensions["A"].width = 1.5
+    for i, p in enumerate(provs):
+        ws.column_dimensions[get_column_letter(start_col + i)].width = COLW
+
+    state = {"r": 1}
+
+    def label_row(text, bg, fg, white=False, h=18):
+        r = state["r"]
+        for i, p in enumerate(provs):
+            c = ws.cell(r, start_col + i, text)
+            c.fill = _fill(bg)
+            c.font = _font(color=(fg or "2B2F33"), bold=True, size=10, white=white)
+            c.alignment = Alignment(vertical="center")
+            c.border = border
+        ws.row_dimensions[r].height = h
+        state["r"] = r + 1
+
+    def text_row(section_key, bg):
+        r = state["r"]
+        maxlines = 1
+        for i, p in enumerate(provs):
+            txt = (results[p].get("sections") or {}).get(section_key, "") or ""
+            c = ws.cell(r, start_col + i, txt)
+            c.fill = _fill(bg)
+            c.font = _font(size=10)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            c.border = border
+            maxlines = max(maxlines, _est_lines(txt, COLW))
+        ws.row_dimensions[r].height = min(640, maxlines * 15 + 6)
+        state["r"] = r + 1
+
+    # ヘッダー(プロバイダ名・色付き)
+    r = state["r"]
+    for i, p in enumerate(provs):
+        name, clr = AI_SHEET_HDR[p]
+        c = ws.cell(r, start_col + i, name)
+        c.fill = _fill(clr)
+        c.font = _font(white=True, bold=True, size=12)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = border
+    ws.row_dimensions[r].height = 22
+    state["r"] = r + 1
+
+    # 経営談義報告書(クリーム)
+    label_row("経営談義報告書", "FFF8E1", "8D6E00", h=16)
+    text_row("REPORT", "FFF8E1")
+    # 販売/収支/資金
+    for key, title in AI_SHEET_CATS:
+        label_row(title, "0A66C2", None, white=True, h=18)
+        label_row("課題", "FDF6F6", "B42318", h=15)
+        text_row(key + "_ISSUE", "FDF6F6")
+        label_row("提案", "F2FBF3", "1A7F37", h=15)
+        text_row(key + "_PROPOSAL", "F2FBF3")
+
+    last_col = get_column_letter(start_col + len(provs) - 1)
+    ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
+
 @app.post("/excel")
 def excel_route():
     body = request.get_json(silent=True) or {}
@@ -360,6 +468,9 @@ def excel_route():
             ws["G%d" % rn] = r.get("v_prev")
         if r.get("v_prev2") not in (None, ""):
             ws["K%d" % rn] = r.get("v_prev2")
+
+    # AI診断シート(3AI分析を貼る。1〜3個でもエラーにしない。要約は貼らない)
+    build_ai_sheet(wb, body.get("results"))
 
     bio = BytesIO()
     wb.save(bio)
