@@ -113,6 +113,17 @@ def build_prompt(data, tone):
         "【財務データ】\n" + body + "\n"
     )
 
+def render_analysis_template(template, data, tone):
+    """外部プロンプト雛形に {tone}/{fin} を差し込む。{fin} が無ければデータを末尾に補完。"""
+    aliases = {"mild": "plain", "normal": "expert", "strict": "expert"}
+    tone = aliases.get(tone, tone)
+    tone = tone if tone in TONE_INSTRUCTIONS else "expert"
+    fin = _format_financial(data)
+    p = template.replace("{tone}", TONE_INSTRUCTIONS[tone]).replace("{fin}", fin)
+    if "{fin}" not in template:
+        p += "\n\n【財務データ】\n" + fin
+    return p
+
 def split_sections(text):
     out = {}
     if not text:
@@ -172,8 +183,12 @@ def _run(prov, prompt, results):
     except Exception as e:
         results[prov] = {"error": str(e)[:300]}
 
-def analyze(data, tone, providers):
-    prompt = build_prompt(data, tone)
+def analyze(data, tone, providers, template=None):
+    # 外部プロンプト雛形(zaiTask の analysisprompt)があればそれを使用。無ければ内蔵。
+    if isinstance(template, str) and template.strip():
+        prompt = render_analysis_template(template, data, tone)
+    else:
+        prompt = build_prompt(data, tone)
     results = {}
     ts = []
     for p in providers:
@@ -204,7 +219,7 @@ def analyze_route():
         providers = ["claude", "openai", "gemini"]
     if not data.get("financials"):
         return jsonify({"status": "NG", "error": "report.financials がありません"}), 400
-    results = analyze(data, tone, providers)
+    results = analyze(data, tone, providers, body.get("prompt_template"))
     return jsonify({"status": "OK", "tone": tone, "providers": providers, "results": results})
 
 # ---- AI自動要約 (複数AIの分析を比較・検証) -----------------------------
