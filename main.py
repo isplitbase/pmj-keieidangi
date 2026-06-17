@@ -316,8 +316,9 @@ def summarize_route():
     if not results:
         return jsonify({"status": "NG", "error": "results(各AIの分析)がありません"}), 400
 
-    # 要約担当AIを選定: SUMMARY_PROVIDER 指定 → 無ければキーのある先頭
-    pref = (os.environ.get("SUMMARY_PROVIDER", "") or "").strip().lower()
+    # 要約担当AIを選定: body.provider 指定 → SUMMARY_PROVIDER 環境変数 → 既定順
+    req_prov = (str(body.get("provider") or "")).strip().lower()
+    pref = req_prov if req_prov in PROVIDERS else (os.environ.get("SUMMARY_PROVIDER", "") or "").strip().lower()
     order = ([pref] if pref in PROVIDERS else []) + [p for p in SUMMARY_ORDER if p != pref]
     chosen = None
     for p in order:
