@@ -288,6 +288,23 @@ def build_summary_prompt(data, results, tone):
         "【各AIの分析】\n" + analyses + "\n"
     )
 
+def render_summary_template(template, data, results, tone):
+    """外部から渡されたプロンプト雛形に {tone}/{fin}/{analyses} を差し込む。
+       雛形に該当プレースホルダが無い場合はデータを末尾に補完(取りこぼし防止)。"""
+    aliases = {"mild": "plain", "normal": "expert", "strict": "expert"}
+    tone = aliases.get(tone, tone)
+    tone = tone if tone in TONE_INSTRUCTIONS else "expert"
+    fin = _format_financial(data)
+    analyses = _format_results(results)
+    p = (template.replace("{tone}", TONE_INSTRUCTIONS[tone])
+                 .replace("{fin}", fin)
+                 .replace("{analyses}", analyses))
+    if "{fin}" not in template:
+        p += "\n\n【財務データ】\n" + fin
+    if "{analyses}" not in template:
+        p += "\n\n【各AIの分析】\n" + analyses
+    return p
+
 @app.post("/summarize")
 def summarize_route():
     body = request.get_json(silent=True) or {}
@@ -310,7 +327,12 @@ def summarize_route():
     if not chosen:
         return jsonify({"status": "NG", "error": "要約用のAPIキーが未設定です"}), 200
 
-    prompt = build_summary_prompt(data, results, tone)
+    # 外部プロンプト雛形(zaiTask の summaryprompt)があればそれを使用。無ければ内蔵。
+    template = body.get("prompt_template")
+    if isinstance(template, str) and template.strip():
+        prompt = render_summary_template(template, data, results, tone)
+    else:
+        prompt = build_summary_prompt(data, results, tone)
     try:
         text = PROVIDERS[chosen](prompt)
     except Exception as e:
