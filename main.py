@@ -477,6 +477,75 @@ def build_ai_sheet(wb, results, layout="landscape"):
     last_col = get_column_letter(start_col + len(provs) - 1)
     ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
 
+# ---- AI診断要約シート (AI自動要約を AI診断 の隣に。画面配色を踏襲) -------
+SUMMARY_SHEET_CATS = [("SALES", "販売"), ("INCOME", "収支"), ("CAPITAL", "資金")]
+
+def build_summary_sheet(wb, summary):
+    """AI自動要約(報告書/販売/収支/資金 の各要約)を「AI診断要約」シートに貼る。
+       summary = {REPORT, SALES, INCOME, CAPITAL}。内容が無ければ作らない。
+       配色は画面の AI自動要約パネル準拠(ヘッダ紫/報告書クリーム/カテゴリ青)。"""
+    summary = summary or {}
+    keys = ["REPORT", "SALES", "INCOME", "CAPITAL"]
+    if not any(str(summary.get(k) or "").strip() for k in keys):
+        return  # 要約が無ければシートは作らない
+
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    FONT = "Yu Gothic"
+    def _fill(c):
+        return PatternFill("solid", fgColor=c)
+    def _font(color="2B2F33", bold=False, size=10, white=False):
+        return Font(name=FONT, size=size, bold=bold, color=("FFFFFF" if white else color))
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    name = "AI診断要約"
+    if name in wb.sheetnames:
+        ws = wb[name]
+    else:
+        idx = (wb.sheetnames.index("AI診断") + 1) if "AI診断" in wb.sheetnames else len(wb.sheetnames)
+        ws = wb.create_sheet(name, idx)  # AI診断 の隣(右)に作る
+
+    # A4・縦向き・幅1ページに収める(1列・全幅)
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = 9
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
+
+    COLW = 95
+    COL = 2  # B列(全幅)
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions[get_column_letter(COL)].width = COLW
+    st = {"r": 1}
+
+    def put(text, bg, fg, white=False, bold=True, size=10, wrap=False, h=18, center=False):
+        r = st["r"]
+        c = ws.cell(r, COL, text)
+        c.fill = _fill(bg)
+        c.font = _font(color=(fg or "2B2F33"), bold=bold, size=size, white=white)
+        if wrap:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.row_dimensions[r].height = min(680, _est_lines(text, COLW) * 15 + 6)
+        else:
+            c.alignment = Alignment(vertical="center", horizontal=("center" if center else "left"))
+            ws.row_dimensions[r].height = h
+        c.border = border
+        st["r"] = r + 1
+
+    put("AI自動要約", "6A4EA3", None, white=True, bold=True, size=13, h=24, center=True)  # 紫
+    put("経営談義報告書（要約）", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
+    put(str(summary.get("REPORT", "") or ""), "FFF8E1", None, bold=False, wrap=True)
+    for key, title in SUMMARY_SHEET_CATS:
+        put(title + "（要約）", "0A66C2", None, white=True, bold=True, size=11, h=20)
+        put(str(summary.get(key, "") or ""), "FFFFFF", None, bold=False, wrap=True)
+
+    ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
+
 @app.post("/excel")
 def excel_route():
     body = request.get_json(silent=True) or {}
@@ -520,6 +589,9 @@ def excel_route():
     if layout not in ("portrait", "landscape"):
         layout = "portrait"  # 既定: 縦向き・縦積み
     build_ai_sheet(wb, body.get("results"), layout)
+
+    # AI診断要約シート(AI自動要約を AI診断 の隣に。内容が無ければ作らない)
+    build_summary_sheet(wb, body.get("summary"))
 
     bio = BytesIO()
     wb.save(bio)
