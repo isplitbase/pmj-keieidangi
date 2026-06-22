@@ -138,13 +138,35 @@ def split_sections(text):
     return out
 
 # ---- 各プロバイダ (非ストリーミング) ------------------------------------
+# 優先モデル。使えなければ API のモデル一覧から利用可能なものへ自動フォールバック
+PREFERRED_CLAUDE_MODEL = "claude-sonnet-4-6"
+_claude_model_cache = None
+
+def _resolve_claude_model(client):
+    """claude-sonnet-4-6 が利用可能ならそれを使う。
+       使えない場合は API の models.list() から利用可能なモデル(sonnet優先→最新)を選ぶ。
+       環境変数 ANTHROPIC_MODEL は使用しない。"""
+    global _claude_model_cache
+    if _claude_model_cache:
+        return _claude_model_cache
+    chosen = PREFERRED_CLAUDE_MODEL
+    try:
+        ids = [m.id for m in client.models.list(limit=1000).data]
+        if PREFERRED_CLAUDE_MODEL not in ids:
+            sonnets = sorted([m for m in ids if "sonnet" in m], reverse=True)
+            chosen = sonnets[0] if sonnets else (ids[0] if ids else PREFERRED_CLAUDE_MODEL)
+    except Exception:
+        chosen = PREFERRED_CLAUDE_MODEL  # 一覧取得不可時は優先モデルで試行
+    _claude_model_cache = chosen
+    return chosen
+
 def call_claude(prompt):
     import anthropic
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY 未設定")
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
     client = anthropic.Anthropic(api_key=key)
+    model = _resolve_claude_model(client)
     msg = client.messages.create(
         model=model, max_tokens=3000,
         messages=[{"role": "user", "content": prompt}],
