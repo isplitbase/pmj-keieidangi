@@ -174,26 +174,85 @@ def call_claude(prompt):
     return "".join(getattr(b, "text", "") for b in msg.content
                    if getattr(b, "type", None) == "text")
 
+# OpenAI 優先モデル。使えなければ models.list() から利用可能な gpt 系へフォールバック
+PREFERRED_OPENAI_MODEL = "gpt-4o-mini"
+_openai_model_cache = None
+
+def _resolve_openai_model(client):
+    """gpt-4o-mini が使えればそれ。無ければ gpt 系チャットモデルの利用可能な最新を選ぶ。
+       環境変数 OPENAI_MODEL は使用しない。"""
+    global _openai_model_cache
+    if _openai_model_cache:
+        return _openai_model_cache
+    chosen = PREFERRED_OPENAI_MODEL
+    try:
+        ids = [m.id for m in client.models.list().data]
+        if PREFERRED_OPENAI_MODEL not in ids:
+            BLOCK = ("embedding", "whisper", "tts", "dall-e", "image", "audio",
+                     "realtime", "moderation", "transcribe", "search")
+            usable = [i for i in ids if i.startswith("gpt-") and not any(b in i for b in BLOCK)]
+            for p in ("gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4", "gpt-"):
+                cands = sorted([i for i in usable if i.startswith(p)], reverse=True)
+                if cands:
+                    chosen = cands[0]
+                    break
+    except Exception:
+        chosen = PREFERRED_OPENAI_MODEL
+    _openai_model_cache = chosen
+    return chosen
+
 def call_openai(prompt):
     from openai import OpenAI
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY 未設定")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     client = OpenAI(api_key=key)
+    model = _resolve_openai_model(client)
     r = client.chat.completions.create(
         model=model, temperature=0.3,
         messages=[{"role": "user", "content": prompt}],
     )
     return r.choices[0].message.content or ""
 
+# Gemini 優先モデル。使えなければ models.list()(generateContent対応)から最新へフォールバック
+PREFERRED_GEMINI_MODEL = "gemini-2.5-flash"
+_gemini_model_cache = None
+
+def _resolve_gemini_model(client):
+    """gemini-2.5-flash が使えればそれ。無ければ generateContent 対応の gemini 系の最新を選ぶ。
+       環境変数 GEMINI_MODEL は使用しない。"""
+    global _gemini_model_cache
+    if _gemini_model_cache:
+        return _gemini_model_cache
+    chosen = PREFERRED_GEMINI_MODEL
+    try:
+        names = []
+        for m in client.models.list():
+            n = (getattr(m, "name", "") or "").split("/")[-1]
+            if not n:
+                continue
+            acts = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+            if acts and not any("generateContent" in str(a) for a in acts):
+                continue
+            names.append(n)
+        if PREFERRED_GEMINI_MODEL not in names:
+            for p in ("gemini-2.5-flash", "gemini-2.5", "gemini-flash", "gemini-"):
+                cands = sorted([n for n in names if n.startswith(p) and "embedding" not in n], reverse=True)
+                if cands:
+                    chosen = cands[0]
+                    break
+    except Exception:
+        chosen = PREFERRED_GEMINI_MODEL
+    _gemini_model_cache = chosen
+    return chosen
+
 def call_gemini(prompt):
     from google import genai
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GOOGLE_API_KEY 未設定")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     client = genai.Client(api_key=key)
+    model = _resolve_gemini_model(client)
     r = client.models.generate_content(model=model, contents=prompt)
     return getattr(r, "text", "") or ""
 
