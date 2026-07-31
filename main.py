@@ -87,6 +87,15 @@ def _format_financial(data):
                 fmt(r.get("diff_prev2"), r.get("u_diff2")),
             )
         )
+    # 地区平均(ベンチマーク): 同一地区・同一年商ランクの平均。自店と比較する材料
+    reg = (data or {}).get("regional") or {}
+    gm, ph = reg.get("gross_margin_avg"), reg.get("ph_avg")
+    if gm is not None or ph is not None:
+        lines.append("")
+        lines.append("【地区平均（ベンチマーク）】※同一地区・同一年商ランクの平均。自店の粗利益率・従業員P・Hと比較して講評すること")
+        lines.append("地区: %s / 年商ランク: %s" % (reg.get("chiku") or "-", reg.get("rank") or "-"))
+        lines.append("平均粗利益率: %s" % ("%.1f%%" % gm if gm is not None else "-"))
+        lines.append("平均従業員P・H: %s" % ("{:,.0f}千円".format(ph) if ph is not None else "-"))
     return "\n".join(lines)
 
 def build_prompt(data, tone):
