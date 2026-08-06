@@ -87,15 +87,16 @@ def _format_financial(data):
                 fmt(r.get("diff_prev2"), r.get("u_diff2")),
             )
         )
-    # 地区平均(ベンチマーク): 同一地区・同一年商ランクの平均。自店と比較する材料
+    # 全国平均(ベンチマーク): 直近決算の販売高から年商ランクを判定した全国平均。自店と比較する材料
     reg = (data or {}).get("regional") or {}
     gm, ph = reg.get("gross_margin_avg"), reg.get("ph_avg")
     if gm is not None or ph is not None:
         lines.append("")
-        lines.append("【地区平均（ベンチマーク）】※同一地区・同一年商ランクの平均。自店の粗利益率・従業員P・Hと比較して講評すること")
-        lines.append("地区: %s / 年商ランク: %s" % (reg.get("chiku") or "-", reg.get("rank") or "-"))
-        lines.append("平均粗利益率: %s" % ("%.1f%%" % gm if gm is not None else "-"))
-        lines.append("平均従業員P・H: %s" % ("{:,.0f}千円".format(ph) if ph is not None else "-"))
+        lines.append("【全国平均（ベンチマーク）】※直近決算の販売高から判定した年商ランクの全国平均。自店の粗利益率・販売P・Hと比較して講評すること")
+        lines.append("年商ランク: %s%s" % (reg.get("rank") or "-",
+                                        ("（%s）" % reg.get("span")) if reg.get("span") else ""))
+        lines.append("全国平均 粗利益率: %s" % ("%.1f%%" % gm if gm is not None else "-"))
+        lines.append("全国平均 販売P・H: %s" % ("{:,.0f}千円".format(ph) if ph is not None else "-"))
     return "\n".join(lines)
 
 def build_prompt(data, tone):
@@ -702,6 +703,15 @@ def excel_route():
     ws["E7"] = h.get("year_current")
     ws["G7"] = h.get("year_previous")
     ws["K7"] = h.get("year_previous2")
+    # 参考値(全国平均): 直近決算の販売高から判定した年商ランクの全国平均を書き込む。
+    # 右側(T列)の ○/×/▲ 判定は雛形の数式が自動で行う。単位に注意:
+    #   T11: IF(E11<P11,…)        → P11 は千円のまま
+    #   T16: IF(E16<P16*100,…)    → P16 は比率(=%÷100)で入れる
+    reg = (data.get("regional") or {})
+    if reg.get("ph_avg") is not None:
+        ws["P11"] = reg.get("ph_avg")
+    if reg.get("gross_margin_avg") is not None:
+        ws["P16"] = reg.get("gross_margin_avg") / 100.0
     # 入力セルのみ(数式行はスキップ→Excelで再計算)
     for r in fin.get("rows", []):
         rn = r.get("row")
