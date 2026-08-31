@@ -471,6 +471,41 @@ def _est_lines(text, width):
         total += max(1, -(-dl // max(1, int(width))))
     return max(1, total)
 
+def fix_report_print_area(wb, ws):
+    """報告書シートの印刷範囲を復元する。
+
+    雛形の Print_Area は INDIRECT(報告書!$X$1) という動的定義になっており、
+    X1 の文字列("報告書" / "経営談義資料")が名前定義を指すことで
+    印刷範囲を切り替える仕組みになっている。
+    openpyxl は INDIRECT を保持できず Print_Area を "$X$1" に潰してしまい、
+    印刷すると X1 の1セルしか出力されない。
+    そのため生成時に X1 を解決し、実際の範囲を静的に設定し直す。
+    """
+    ref = None
+    try:
+        key = ws["X1"].value
+        if key:
+            key = str(key).strip()
+            dn = None
+            try:
+                dn = ws.defined_names.get(key)      # シートローカル名
+            except Exception:
+                dn = None
+            if dn is None:
+                try:
+                    dn = wb.defined_names.get(key)  # ブックスコープ名
+                except Exception:
+                    dn = None
+            if dn is not None:
+                ref = getattr(dn, "value", None) or getattr(dn, "attr_text", None)
+    except Exception:
+        ref = None
+    if not ref:
+        ref = "$A$3:$X$55"                          # フォールバック(雛形の既定範囲)
+    if "!" in ref:
+        ref = ref.split("!")[-1]
+    ws.print_area = ref
+
 def build_ai_sheet(wb, results, layout="landscape"):
     """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
        layout: "landscape"(横3列並列) / "portrait"(縦・各AIを全幅で縦積み・AIごと改ページ)
@@ -732,6 +767,9 @@ def excel_route():
 
     # AI診断要約シート(AI自動要約を AI診断 の隣に。内容が無ければ作らない)
     build_summary_sheet(wb, body.get("summary"))
+
+    # 印刷範囲の復元(雛形の INDIRECT 定義を openpyxl が保持できないため)
+    fix_report_print_area(wb, ws)
 
     bio = BytesIO()
     wb.save(bio)
