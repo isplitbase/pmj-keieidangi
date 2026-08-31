@@ -147,7 +147,12 @@ def split_sections(text):
         out["REPORT"] = text.strip()
     return out
 
-# ---- 各プロバイダ (非ストリーミング) ------------------------------------
+# ---- 各プロバイダ (Claude のみストリーミング) --------------------------
+# 出力トークン上限 / API クライアントのタイムアウト(秒)。
+# 要約は最大 28000 文字程度になるため大きめに取る。
+MAX_OUTPUT_TOKENS = 32000
+CLIENT_TIMEOUT = 900.0
+
 # 優先モデル。使えなければ API のモデル一覧から利用可能なものへ自動フォールバック
 PREFERRED_CLAUDE_MODEL = "claude-sonnet-4-6"
 _claude_model_cache = None
@@ -175,14 +180,18 @@ def call_claude(prompt):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY 未設定")
-    client = anthropic.Anthropic(api_key=key)
+    client = anthropic.Anthropic(api_key=key, timeout=CLIENT_TIMEOUT)
     model = _resolve_claude_model(client)
-    msg = client.messages.create(
-        model=model, max_tokens=32000,  # 要約を厚く出すため引き上げ
+    # max_tokens が大きいと SDK が「10分を超える可能性のある非ストリーミング要求」として
+    # 送信前に拒否する。要約は長文になるため必ずストリーミングで受け取って連結する。
+    parts = []
+    with client.messages.stream(
+        model=model, max_tokens=MAX_OUTPUT_TOKENS,
         messages=[{"role": "user", "content": prompt}],
-    )
-    return "".join(getattr(b, "text", "") for b in msg.content
-                   if getattr(b, "type", None) == "text")
+    ) as stream:
+        for t in stream.text_stream:
+            parts.append(t)
+    return "".join(parts)
 
 # OpenAI 優先モデル。使えなければ models.list() から利用可能な gpt 系へフォールバック
 PREFERRED_OPENAI_MODEL = "gpt-4o-mini"
@@ -216,7 +225,7 @@ def call_openai(prompt):
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY 未設定")
-    client = OpenAI(api_key=key)
+    client = OpenAI(api_key=key, timeout=CLIENT_TIMEOUT)
     model = _resolve_openai_model(client)
     r = client.chat.completions.create(
         model=model, temperature=0.3,
@@ -267,7 +276,7 @@ def call_gemini(prompt):
     cfg = None
     try:
         from google.genai import types
-        cfg = types.GenerateContentConfig(max_output_tokens=32000)
+        cfg = types.GenerateContentConfig(max_output_tokens=MAX_OUTPUT_TOKENS)
     except Exception:
         cfg = None
     if cfg is not None:
