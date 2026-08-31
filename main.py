@@ -506,6 +506,21 @@ def fix_report_print_area(wb, ws):
         ref = ref.split("!")[-1]
     ws.print_area = ref
 
+def setup_avg_sheet_print(wb):
+    """平均粗利益率・PH シートを A4 横・幅1ページ に収める設定にする。
+       雛形は縦向き(Zoom=100)のままなので、生成時に上書きする。"""
+    name = "平均粗利益率・PH"
+    if name not in wb.sheetnames:
+        return
+    from openpyxl.worksheet.properties import PageSetupProperties
+    ws = wb[name]
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = 9  # A4
+    ws.page_setup.scale = None   # 拡大縮小率をクリア(fitToPage を有効にするため)
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
 def build_ai_sheet(wb, results, layout="landscape"):
     """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
        layout: "landscape"(横3列並列) / "portrait"(縦・各AIを全幅で縦積み・AIごと改ページ)
@@ -770,6 +785,7 @@ def excel_route():
 
     # 印刷範囲の復元(雛形の INDIRECT 定義を openpyxl が保持できないため)
     fix_report_print_area(wb, ws)
+    setup_avg_sheet_print(wb)
 
     bio = BytesIO()
     wb.save(bio)
