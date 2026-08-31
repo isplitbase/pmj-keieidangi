@@ -178,7 +178,7 @@ def call_claude(prompt):
     client = anthropic.Anthropic(api_key=key)
     model = _resolve_claude_model(client)
     msg = client.messages.create(
-        model=model, max_tokens=3000,
+        model=model, max_tokens=8000,   # 要約を厚く出すため引き上げ
         messages=[{"role": "user", "content": prompt}],
     )
     return "".join(getattr(b, "text", "") for b in msg.content
@@ -351,12 +351,18 @@ def _format_results(results):
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
-SUMMARY_SECTIONS = ["SUM_REPORT", "SUM_SALES", "SUM_INCOME", "SUM_CAPITAL"]
+# 要約も分析側と同じ「課題/提案」区分で出力させる(SUM_*_ISSUE / SUM_*_PROPOSAL)。
+# 旧形式(SUM_SALES など課題・提案が一体)のマーカーも受理し、画面/Excelが空にならないようにする。
+SUMMARY_CATS = ["SALES", "INCOME", "CAPITAL"]
+SUMMARY_SECTIONS = (["SUM_REPORT"]
+                    + ["SUM_%s_%s" % (c, s) for c in SUMMARY_CATS for s in ("ISSUE", "PROPOSAL")]
+                    + ["SUM_%s" % c for c in SUMMARY_CATS])   # 末尾3つは旧形式(後方互換)
 SUMMARY_MARKER_RE = re.compile(r"===\s*(" + "|".join(SUMMARY_SECTIONS) + r")\s*===")
-SUMMARY_KEYMAP = {"SUM_REPORT": "REPORT", "SUM_SALES": "SALES", "SUM_INCOME": "INCOME", "SUM_CAPITAL": "CAPITAL"}
+SUMMARY_KEYMAP = dict((s, s[4:]) for s in SUMMARY_SECTIONS)   # "SUM_" を落としたものがキー
 
 def split_summary(text):
-    out = {"REPORT": "", "SALES": "", "INCOME": "", "CAPITAL": ""}
+    out = dict((k, "") for k in SUMMARY_KEYMAP.values())
+    out["REPORT"] = ""
     if not text:
         return out
     matches = list(SUMMARY_MARKER_RE.finditer(text))
@@ -367,32 +373,67 @@ def split_summary(text):
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         out[SUMMARY_KEYMAP[m.group(1)]] = text[start:end].strip()
+    # 旧形式(課題・提案が一体)しか無い区分は、課題側に寄せて表示できるようにする
+    for c in SUMMARY_CATS:
+        if out.get(c) and not out.get(c + "_ISSUE") and not out.get(c + "_PROPOSAL"):
+            out[c + "_ISSUE"] = out[c]
     return out
 
+# 内蔵の要約プロンプト。外部ファイル(zaiTask の summaryprompt)が無い場合に使う。
+# ※ 資材の kr2pmrpcm3pbh6rd655hprompt/summaryprompt と同一内容を保つこと。
+SUMMARY_PROMPT_TEMPLATE = """\
+あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。
+同じ財務データに対して各AIが作成した『経営分析』を比較・統合し、
+経営談義の場でそのまま使える『まとめ』を、販売・収支・資金それぞれの
+『課題』と『提案』に分けて日本語で作成してください。
+（分析が存在するAIのみを対象。AIは1〜3個のいずれの場合もある）
+
+【表現ルール — 100%遵守すること】
+{tone}
+
+【分量 — 重要】
+・短くまとめないこと。各AI単独の記述より必ず詳しく、厚みのある内容にすること。
+・===SUM_REPORT=== は 400〜600文字。
+・各『課題』『提案』は箇条書きで5〜8点。1点あたり60〜120文字とし、根拠となる数値を必ず含める。
+・各AIに共通する指摘は1点に統合し、1つのAIしか触れていない重要な指摘も必ず拾うこと。
+・AI間で結論が食い違う点は、その区分の末尾に「※AI間の見解差：…」として明記する。
+・「特になし」だけで終わらせないこと。
+
+【出力フォーマット (厳守)】
+必ず下記7マーカー形式で出力。余計な前置きは不要。マーカーは半角英大文字のみ。
+課題と提案は明確に分けて書くこと。
+※ マーカー行(===SUM_REPORT=== / ===SUM_SALES_ISSUE=== / ===SUM_SALES_PROPOSAL=== / ===SUM_INCOME_ISSUE=== / ===SUM_INCOME_PROPOSAL=== / ===SUM_CAPITAL_ISSUE=== / ===SUM_CAPITAL_PROPOSAL===)は変更・削除しないでください。出力の解析に使用します。
+
+===SUM_REPORT===
+(全体状況のまとめ。各AIの見解を統合し、キーメッセージ・重要な数値・AI間の見解差を含めて400〜600文字)
+
+===SUM_SALES_ISSUE===
+(販売の課題を統合。箇条書き5〜8点。販売高/月商/ペイライン/従業員生産性の観点)
+
+===SUM_SALES_PROPOSAL===
+(販売の提案を統合。課題に対応する具体的な改善アクション。箇条書き5〜8点)
+
+===SUM_INCOME_ISSUE===
+(収支の課題を統合。箇条書き5〜8点。粗利率・管理経費率・営業利益率・支払利息に言及)
+
+===SUM_INCOME_PROPOSAL===
+(収支の提案を統合。課題に対応する改善アクション。箇条書き5〜8点)
+
+===SUM_CAPITAL_ISSUE===
+(資金の課題を統合。箇条書き5〜8点。現預金日数・売掛/棚卸/借入日数・自己資本に言及)
+
+===SUM_CAPITAL_PROPOSAL===
+(資金の提案を統合。課題に対応する改善アクション。箇条書き5〜8点)
+
+【財務データ】
+{fin}
+
+【各AIの分析】
+{analyses}
+"""
+
 def build_summary_prompt(data, results, tone):
-    aliases = {"mild": "plain", "normal": "expert", "strict": "expert"}
-    tone = aliases.get(tone, tone)
-    tone = tone if tone in TONE_INSTRUCTIONS else "expert"
-    fin = _format_financial(data)
-    analyses = _format_results(results)
-    return (
-        "あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。\n"
-        "同じ財務データに対して各AIが作成した『経営分析』を比較・検証し、\n"
-        "『経営談義報告書』『販売』『収支』『資金』の4区分それぞれについて、\n"
-        "(1)各AIを踏まえた要約 と (2)各AIの結論の問題点 を日本語でまとめてください。\n"
-        "（分析が存在するAIのみを対象。AIは1〜3個のいずれの場合もある）\n\n"
-        "【表現ルール — 100%遵守すること】\n"
-        + TONE_INSTRUCTIONS[tone] + "\n\n"
-        "【出力フォーマット (厳守)】\n"
-        "必ず下記4マーカー形式で出力。各区分内で『要約』と『各AIの問題点(誤り・根拠薄・数値誤読・見落とし・AI間矛盾。無ければ特になし)』を書く。\n"
-        "余計な前置きは不要。マーカーは半角英大文字のみ。\n\n"
-        "===SUM_REPORT===\n(経営談義報告書(全体)の要約＋各AIの問題点)\n\n"
-        "===SUM_SALES===\n(販売の要約＋各AIの問題点)\n\n"
-        "===SUM_INCOME===\n(収支の要約＋各AIの問題点)\n\n"
-        "===SUM_CAPITAL===\n(資金の要約＋各AIの問題点)\n\n"
-        "【財務データ】\n" + fin + "\n\n"
-        "【各AIの分析】\n" + analyses + "\n"
-    )
+    return render_summary_template(SUMMARY_PROMPT_TEMPLATE, data, results, tone)
 
 def render_summary_template(template, data, results, tone):
     """外部から渡されたプロンプト雛形に {tone}/{fin}/{analyses} を差し込む。
@@ -666,7 +707,9 @@ def build_summary_sheet(wb, summary):
        summary = {REPORT, SALES, INCOME, CAPITAL}。内容が無ければ作らない。
        配色は画面の AI自動要約パネル準拠(ヘッダ紫/報告書クリーム/カテゴリ青)。"""
     summary = summary or {}
-    keys = ["REPORT", "SALES", "INCOME", "CAPITAL"]
+    keys = (["REPORT"]
+            + [c + s for c in SUMMARY_CATS for s in ("_ISSUE", "_PROPOSAL")]
+            + SUMMARY_CATS)
     if not any(str(summary.get(k) or "").strip() for k in keys):
         return  # 要約が無ければシートは作らない
 
@@ -723,7 +766,16 @@ def build_summary_sheet(wb, summary):
     put(str(summary.get("REPORT", "") or ""), "FFF8E1", None, bold=False, wrap=True)
     for key, title in SUMMARY_SHEET_CATS:
         put(title + "（要約）", "0A66C2", None, white=True, bold=True, size=11, h=20)
-        put(str(summary.get(key, "") or ""), "FFFFFF", None, bold=False, wrap=True)
+        issue = str(summary.get(key + "_ISSUE", "") or "")
+        prop = str(summary.get(key + "_PROPOSAL", "") or "")
+        if not issue and not prop:
+            # 旧形式(課題・提案が一体)の要約はそのまま1ブロックで出す
+            put(str(summary.get(key, "") or ""), "FFFFFF", None, bold=False, wrap=True)
+            continue
+        put("課題", "FDF6F6", "B42318", bold=True, size=10, h=15)
+        put(issue, "FDF6F6", None, bold=False, wrap=True)
+        put("提案", "F2FBF3", "1A7F37", bold=True, size=10, h=15)
+        put(prop, "F2FBF3", None, bold=False, wrap=True)
 
     ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
 
