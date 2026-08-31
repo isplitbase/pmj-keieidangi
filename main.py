@@ -178,7 +178,7 @@ def call_claude(prompt):
     client = anthropic.Anthropic(api_key=key)
     model = _resolve_claude_model(client)
     msg = client.messages.create(
-        model=model, max_tokens=8000,   # 要約を厚く出すため引き上げ
+        model=model, max_tokens=16000,  # 要約を厚く出すため引き上げ
         messages=[{"role": "user", "content": prompt}],
     )
     return "".join(getattr(b, "text", "") for b in msg.content
@@ -263,7 +263,17 @@ def call_gemini(prompt):
         raise RuntimeError("GOOGLE_API_KEY 未設定")
     client = genai.Client(api_key=key)
     model = _resolve_gemini_model(client)
-    r = client.models.generate_content(model=model, contents=prompt)
+    # 要約を長く出すため出力上限を明示(未対応SDKでは指定なしで実行)
+    cfg = None
+    try:
+        from google.genai import types
+        cfg = types.GenerateContentConfig(max_output_tokens=16000)
+    except Exception:
+        cfg = None
+    if cfg is not None:
+        r = client.models.generate_content(model=model, contents=prompt, config=cfg)
+    else:
+        r = client.models.generate_content(model=model, contents=prompt)
     return getattr(r, "text", "") or ""
 
 PROVIDERS = {"claude": call_claude, "openai": call_openai, "gemini": call_gemini}
@@ -384,20 +394,23 @@ def split_summary(text):
 SUMMARY_PROMPT_TEMPLATE = """\
 あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。
 同じ財務データに対して各AIが作成した『経営分析』を比較・統合し、
-経営談義の場でそのまま使える『まとめ』を、販売・収支・資金それぞれの
+経営談義の場でそのまま配布・議論できる『まとめ』を、販売・収支・資金それぞれの
 『課題』と『提案』に分けて日本語で作成してください。
 （分析が存在するAIのみを対象。AIは1〜3個のいずれの場合もある）
 
 【表現ルール — 100%遵守すること】
 {tone}
 
-【分量 — 重要】
-・短くまとめないこと。各AI単独の記述より必ず詳しく、厚みのある内容にすること。
-・===SUM_REPORT=== は 400〜600文字。
-・各『課題』『提案』は箇条書きで5〜8点。1点あたり60〜120文字とし、根拠となる数値を必ず含める。
-・各AIに共通する指摘は1点に統合し、1つのAIしか触れていない重要な指摘も必ず拾うこと。
-・AI間で結論が食い違う点は、その区分の末尾に「※AI間の見解差：…」として明記する。
-・「特になし」だけで終わらせないこと。
+【分量 — 最重要。必ず守ること】
+・要約と称して短くしないこと。各AIの記述を圧縮するのではなく、統合して大幅に厚くすること。
+・===SUM_REPORT=== は 800〜1200文字。段落を3〜4つに分けて記述する。
+・各『課題』『提案』は箇条書きで8〜12点。1点あたり80〜150文字で記述する。
+・各点には必ず「該当する数値（金額・比率・日数・前期比）」と「なぜそう言えるかの根拠」を含める。
+・提案は「誰が・何を・いつまでに・どの水準まで」が分かる粒度で書く。可能なら目標値を数値で示す。
+・各AIに共通する指摘は1点に統合し、1つのAIしか触れていない指摘も重要であれば必ず拾うこと。
+・各AIの指摘を拾い切っても点数が足りない場合は、財務データから読み取れる論点を自分で追加すること。
+・AI間で結論が食い違う点は、その区分の末尾に「※AI間の見解差：…」として1〜2点で明記する。
+・「特になし」「同上」などで省略しないこと。全区分を最後まで書き切ること。
 
 【出力フォーマット (厳守)】
 必ず下記7マーカー形式で出力。余計な前置きは不要。マーカーは半角英大文字のみ。
@@ -405,25 +418,26 @@ SUMMARY_PROMPT_TEMPLATE = """\
 ※ マーカー行(===SUM_REPORT=== / ===SUM_SALES_ISSUE=== / ===SUM_SALES_PROPOSAL=== / ===SUM_INCOME_ISSUE=== / ===SUM_INCOME_PROPOSAL=== / ===SUM_CAPITAL_ISSUE=== / ===SUM_CAPITAL_PROPOSAL===)は変更・削除しないでください。出力の解析に使用します。
 
 ===SUM_REPORT===
-(全体状況のまとめ。各AIの見解を統合し、キーメッセージ・重要な数値・AI間の見解差を含めて400〜600文字)
+(全体状況のまとめ。各AIの見解を統合し、業績の推移・キーメッセージ・重要な数値・
+ 全国平均との比較・AI間の見解差を含めて800〜1200文字。段落を3〜4つに分ける)
 
 ===SUM_SALES_ISSUE===
-(販売の課題を統合。箇条書き5〜8点。販売高/月商/ペイライン/従業員生産性の観点)
+(販売の課題を統合。箇条書き8〜12点。販売高/平均月商/ペイライン/従業員生産性の観点)
 
 ===SUM_SALES_PROPOSAL===
-(販売の提案を統合。課題に対応する具体的な改善アクション。箇条書き5〜8点)
+(販売の提案を統合。課題に対応する具体的な改善アクション。箇条書き8〜12点)
 
 ===SUM_INCOME_ISSUE===
-(収支の課題を統合。箇条書き5〜8点。粗利率・管理経費率・営業利益率・支払利息に言及)
+(収支の課題を統合。箇条書き8〜12点。粗利率・管理経費率・営業利益率・支払利息に言及)
 
 ===SUM_INCOME_PROPOSAL===
-(収支の提案を統合。課題に対応する改善アクション。箇条書き5〜8点)
+(収支の提案を統合。課題に対応する改善アクション。箇条書き8〜12点)
 
 ===SUM_CAPITAL_ISSUE===
-(資金の課題を統合。箇条書き5〜8点。現預金日数・売掛/棚卸/借入日数・自己資本に言及)
+(資金の課題を統合。箇条書き8〜12点。現預金日数・売掛/棚卸/借入日数・自己資本に言及)
 
 ===SUM_CAPITAL_PROPOSAL===
-(資金の提案を統合。課題に対応する改善アクション。箇条書き5〜8点)
+(資金の提案を統合。課題に対応する改善アクション。箇条書き8〜12点)
 
 【財務データ】
 {fin}
@@ -761,21 +775,41 @@ def build_summary_sheet(wb, summary):
         c.border = border
         st["r"] = r + 1
 
+    # Excel の行高は最大 409pt。長文を1セルに入れると末尾が印刷されないため、
+    # 一定の行数で区切って複数セルに分けて出す(見た目は同じ色で連続する)。
+    MAX_LINES = 24
+
+    def put_text(text, bg):
+        text = str(text or "")
+        if not text.strip():
+            put("", bg, None, bold=False, wrap=True)
+            return
+        chunk, used = [], 0
+        for line in text.split("\n"):
+            n = _est_lines(line, COLW)
+            if chunk and used + n > MAX_LINES:
+                put("\n".join(chunk), bg, None, bold=False, wrap=True)
+                chunk, used = [], 0
+            chunk.append(line)
+            used += n
+        if chunk:
+            put("\n".join(chunk), bg, None, bold=False, wrap=True)
+
     put("AI自動要約", "6A4EA3", None, white=True, bold=True, size=13, h=24, center=True)  # 紫
     put("経営談義報告書（要約）", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
-    put(str(summary.get("REPORT", "") or ""), "FFF8E1", None, bold=False, wrap=True)
+    put_text(summary.get("REPORT", ""), "FFF8E1")
     for key, title in SUMMARY_SHEET_CATS:
         put(title + "（要約）", "0A66C2", None, white=True, bold=True, size=11, h=20)
         issue = str(summary.get(key + "_ISSUE", "") or "")
         prop = str(summary.get(key + "_PROPOSAL", "") or "")
         if not issue and not prop:
             # 旧形式(課題・提案が一体)の要約はそのまま1ブロックで出す
-            put(str(summary.get(key, "") or ""), "FFFFFF", None, bold=False, wrap=True)
+            put_text(summary.get(key, ""), "FFFFFF")
             continue
         put("課題", "FDF6F6", "B42318", bold=True, size=10, h=15)
-        put(issue, "FDF6F6", None, bold=False, wrap=True)
+        put_text(issue, "FDF6F6")
         put("提案", "F2FBF3", "1A7F37", bold=True, size=10, h=15)
-        put(prop, "F2FBF3", None, bold=False, wrap=True)
+        put_text(prop, "F2FBF3")
 
     ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
 
