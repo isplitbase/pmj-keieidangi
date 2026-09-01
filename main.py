@@ -629,11 +629,53 @@ def setup_avg_sheet_print(wb):
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
 
+MAX_CELL_LINES = 24   # 1セルの最大表示行数。Excel の行高上限(409pt)を超えないよう分割する
+
+def _text_chunks(text, width, maxlines=MAX_CELL_LINES):
+    """本文を maxlines 相当ごとに分割する。改行位置でのみ切るので文の途中では切れない。"""
+    text = str(text or "")
+    if not text.strip():
+        return [""]
+    out, cur, used = [], [], 0
+    for line in text.split("\n"):
+        n = _est_lines(line, width)
+        if cur and used + n > maxlines:
+            out.append("\n".join(cur))
+            cur, used = [], 0
+        cur.append(line)
+        used += n
+    if cur:
+        out.append("\n".join(cur))
+    return out or [""]
+
+def _labeled_text(label, color, body, font_name="Yu Gothic", size=10):
+    """見出しと本文を1つのセルにまとめた値を返す(見出しだけ太字・色付き)。
+       Excel は1つの行をページ間で分割しないため、これで
+       「見出しだけ前のページに残る」現象を防げる。
+       リッチテキスト非対応の openpyxl では見出しを普通の文字として付ける。"""
+    body = str(body or "")
+    try:
+        from openpyxl.cell.rich_text import CellRichText, TextBlock
+        from openpyxl.cell.text import InlineFont
+        return CellRichText(
+            TextBlock(InlineFont(rFont=font_name, sz=size, b=True, color=color), label + "\n"),
+            TextBlock(InlineFont(rFont=font_name, sz=size, color="2B2F33"), body),
+        )
+    except Exception:
+        return label + "\n" + body
+
 def build_ai_sheet(wb, results, layout="landscape", summary=None):
     """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
        AI自動要約があれば、各AIの右隣(3AIなら E列)に1列として並べる。
-       layout: "landscape"(横並列) / "portrait"(縦・全幅で縦積み・ブロックごと改ページ)
-       results が 1〜3個でも 0個でもエラーにしない。"""
+       layout: "landscape"(横並列) / "portrait"(縦・全幅で縦積み)
+       results が 1〜3個でも 0個でもエラーにしない。
+
+       改ページ対策:
+         ・「課題」「提案」の見出しは本文と同じセルに入れる。Excel は1つの行を
+           ページ間で分割しないため、見出しだけ前ページに残ることがなくなる。
+         ・区分(販売/収支/資金)は必ずページ先頭から始める。
+         ・長い本文は 24行ごとにセルを分け、1行が1ページに収まるようにする。
+    """
     results = results or {}
     provs = [p for p in AI_SHEET_PROVS
              if isinstance(results.get(p), dict) and results[p].get("sections")]
@@ -668,7 +710,7 @@ def build_ai_sheet(wb, results, layout="landscape", summary=None):
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
 
-    # ============ 縦向き・縦積み(各ブロックを全幅、ブロックごとに改ページ) ============
+    # ============ 縦向き・縦積み(各ブロックを全幅) ============
     if layout == "portrait":
         ws.page_setup.orientation = "portrait"
         ws.page_margins.left = ws.page_margins.right = 0.4
@@ -679,36 +721,43 @@ def build_ai_sheet(wb, results, layout="landscape", summary=None):
         ws.column_dimensions[get_column_letter(COL)].width = COLW
         st = {"r": 1}
 
-        def put(text, bg, fg, white=False, bold=True, size=10, wrap=False, h=18, center=False):
+        def put(value, bg, fg, white=False, bold=True, size=10, wrap=False, h=18,
+                center=False, lines=1):
             r = st["r"]
-            c = ws.cell(r, COL, text)
+            c = ws.cell(r, COL, value)
             c.fill = _fill(bg)
             c.font = _font(color=(fg or "2B2F33"), bold=bold, size=size, white=white)
             if wrap:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.row_dimensions[r].height = min(400, _est_lines(text, COLW) * 15 + 6)
+                ws.row_dimensions[r].height = min(400, lines * 15 + 6)
             else:
-                c.alignment = Alignment(vertical="center", horizontal=("center" if center else "left"))
+                c.alignment = Alignment(vertical="center",
+                                        horizontal=("center" if center else "left"))
                 ws.row_dimensions[r].height = h
             c.border = border
             st["r"] = r + 1
 
+        def put_section(sec, section_key, bg, label=None, label_color=None):
+            for i, ck in enumerate(_text_chunks(sec.get(section_key, ""), COLW)):
+                if i == 0 and label:
+                    put(_labeled_text(label, label_color, ck, FONT), bg, None,
+                        bold=False, wrap=True, lines=_est_lines(ck, COLW) + 1)
+                else:
+                    put(ck, bg, None, bold=False, wrap=True, lines=_est_lines(ck, COLW))
+
         first = True
         for name, clr, sec in cols:
             if not first:
-                ws.row_dimensions[st["r"]].height = 8  # 余白
-                st["r"] += 1
                 ws.row_breaks.append(Break(id=st["r"] - 1))  # 次のブロックはページ先頭から
             first = False
             put(name, clr, None, white=True, bold=True, size=14, h=26, center=True)
             put("経営談義報告書", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
-            put(sec.get("REPORT", "") or "", "FFF8E1", None, bold=False, wrap=True)
+            put_section(sec, "REPORT", "FFF8E1")
             for key, title in AI_SHEET_CATS:
+                ws.row_breaks.append(Break(id=st["r"] - 1))  # 区分は必ずページ先頭から
                 put(title, "0A66C2", None, white=True, bold=True, size=11, h=20)
-                put("課題", "FDF6F6", "B42318", bold=True, size=10, h=15)
-                put(sec.get(key + "_ISSUE", "") or "", "FDF6F6", None, bold=False, wrap=True)
-                put("提案", "F2FBF3", "1A7F37", bold=True, size=10, h=15)
-                put(sec.get(key + "_PROPOSAL", "") or "", "F2FBF3", None, bold=False, wrap=True)
+                put_section(sec, key + "_ISSUE", "FDF6F6", "課題", "B42318")
+                put_section(sec, key + "_PROPOSAL", "F2FBF3", "提案", "1A7F37")
         ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
         return
 
@@ -736,20 +785,30 @@ def build_ai_sheet(wb, results, layout="landscape", summary=None):
         ws.row_dimensions[r].height = h
         state["r"] = r + 1
 
-    def text_row(section_key, bg):
-        r = state["r"]
-        maxlines = 1
-        for i, (_name, _clr, sec) in enumerate(cols):
-            txt = sec.get(section_key, "") or ""
-            c = ws.cell(r, start_col + i, txt)
-            c.fill = _fill(bg)
-            c.font = _font(size=10)
-            c.alignment = Alignment(wrap_text=True, vertical="top")
-            c.border = border
-            maxlines = max(maxlines, _est_lines(txt, COLW))
-        # Excel の行高上限は 409pt。超える指定は無視されて末尾が印刷されないため抑える
-        ws.row_dimensions[r].height = min(400, maxlines * 15 + 6)
-        state["r"] = r + 1
+    def section_rows(section_key, bg, label=None, label_color=None):
+        """1セクションを出力する。label があれば先頭セルに同じセル内で付ける。
+           長い本文は複数行(セル)に分割する。"""
+        per_col = [_text_chunks(sec.get(section_key, ""), COLW) for _n, _c, sec in cols]
+        nrows = max(len(x) for x in per_col)
+        for ri in range(nrows):
+            r = state["r"]
+            maxlines = 1
+            for i in range(len(cols)):
+                txt = per_col[i][ri] if ri < len(per_col[i]) else ""
+                if ri == 0 and label:
+                    value = _labeled_text(label, label_color, txt, FONT)
+                    lines = _est_lines(txt, COLW) + 1
+                else:
+                    value = txt
+                    lines = _est_lines(txt, COLW)
+                c = ws.cell(r, start_col + i, value)
+                c.fill = _fill(bg)
+                c.font = _font(size=10)
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+                c.border = border
+                maxlines = max(maxlines, lines)
+            ws.row_dimensions[r].height = min(400, maxlines * 15 + 6)
+            state["r"] = r + 1
 
     r = state["r"]
     for i, (name, clr, _sec) in enumerate(cols):
@@ -762,25 +821,28 @@ def build_ai_sheet(wb, results, layout="landscape", summary=None):
     state["r"] = r + 1
 
     label_row("経営談義報告書", "FFF8E1", "8D6E00", h=16)
-    text_row("REPORT", "FFF8E1")
+    section_rows("REPORT", "FFF8E1")
     for key, title in AI_SHEET_CATS:
+        ws.row_breaks.append(Break(id=state["r"] - 1))  # 区分は必ずページ先頭から
         label_row(title, "0A66C2", None, white=True, h=18)
-        label_row("課題", "FDF6F6", "B42318", h=15)
-        text_row(key + "_ISSUE", "FDF6F6")
-        label_row("提案", "F2FBF3", "1A7F37", h=15)
-        text_row(key + "_PROPOSAL", "F2FBF3")
+        section_rows(key + "_ISSUE", "FDF6F6", "課題", "B42318")
+        section_rows(key + "_PROPOSAL", "F2FBF3", "提案", "1A7F37")
 
     last_col = get_column_letter(start_col + len(cols) - 1)
-    ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
     ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
 
 # ---- AI診断要約シート (AI自動要約を AI診断 の隣に。画面配色を踏襲) -------
 SUMMARY_SHEET_CATS = [("SALES", "販売"), ("INCOME", "収支"), ("CAPITAL", "資金")]
 
 def build_summary_sheet(wb, summary):
-    """AI自動要約(報告書/販売/収支/資金 の各要約)を「AI診断要約」シートに貼る。
-       summary = {REPORT, SALES, INCOME, CAPITAL}。内容が無ければ作らない。
-       配色は画面の AI自動要約パネル準拠(ヘッダ紫/報告書クリーム/カテゴリ青)。"""
+    """AI自動要約(報告書/販売/収支/資金 の課題・提案)を「AI診断要約」シートに貼る。
+       内容が無ければ作らない。配色は画面の AI自動要約パネル準拠。
+
+       改ページ対策は AI診断シートと同じ:
+         ・「課題」「提案」の見出しは本文と同じセルに入れる
+         ・区分(販売/収支/資金)は必ずページ先頭から始める
+         ・長い本文は 24行ごとにセルを分ける
+    """
     summary = summary or {}
     keys = (["REPORT"]
             + [c + s for c in SUMMARY_CATS for s in ("_ISSUE", "_PROPOSAL")]
@@ -791,6 +853,7 @@ def build_summary_sheet(wb, summary):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.worksheet.pagebreak import Break
 
     FONT = "Yu Gothic"
     def _fill(c):
@@ -822,55 +885,44 @@ def build_summary_sheet(wb, summary):
     ws.column_dimensions[get_column_letter(COL)].width = COLW
     st = {"r": 1}
 
-    def put(text, bg, fg, white=False, bold=True, size=10, wrap=False, h=18, center=False):
+    def put(value, bg, fg, white=False, bold=True, size=10, wrap=False, h=18,
+            center=False, lines=1):
         r = st["r"]
-        c = ws.cell(r, COL, text)
+        c = ws.cell(r, COL, value)
         c.fill = _fill(bg)
         c.font = _font(color=(fg or "2B2F33"), bold=bold, size=size, white=white)
         if wrap:
             c.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.row_dimensions[r].height = min(680, _est_lines(text, COLW) * 15 + 6)
+            ws.row_dimensions[r].height = min(400, lines * 15 + 6)
         else:
-            c.alignment = Alignment(vertical="center", horizontal=("center" if center else "left"))
+            c.alignment = Alignment(vertical="center",
+                                    horizontal=("center" if center else "left"))
             ws.row_dimensions[r].height = h
         c.border = border
         st["r"] = r + 1
 
-    # Excel の行高は最大 409pt。長文を1セルに入れると末尾が印刷されないため、
-    # 一定の行数で区切って複数セルに分けて出す(見た目は同じ色で連続する)。
-    MAX_LINES = 24
-
-    def put_text(text, bg):
-        text = str(text or "")
-        if not text.strip():
-            put("", bg, None, bold=False, wrap=True)
-            return
-        chunk, used = [], 0
-        for line in text.split("\n"):
-            n = _est_lines(line, COLW)
-            if chunk and used + n > MAX_LINES:
-                put("\n".join(chunk), bg, None, bold=False, wrap=True)
-                chunk, used = [], 0
-            chunk.append(line)
-            used += n
-        if chunk:
-            put("\n".join(chunk), bg, None, bold=False, wrap=True)
+    def put_section(text, bg, label=None, label_color=None):
+        for i, ck in enumerate(_text_chunks(text, COLW)):
+            if i == 0 and label:
+                put(_labeled_text(label, label_color, ck, FONT), bg, None,
+                    bold=False, wrap=True, lines=_est_lines(ck, COLW) + 1)
+            else:
+                put(ck, bg, None, bold=False, wrap=True, lines=_est_lines(ck, COLW))
 
     put("AI自動要約", "6A4EA3", None, white=True, bold=True, size=13, h=24, center=True)  # 紫
     put("経営談義報告書（要約）", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
-    put_text(summary.get("REPORT", ""), "FFF8E1")
+    put_section(summary.get("REPORT", ""), "FFF8E1")
     for key, title in SUMMARY_SHEET_CATS:
+        ws.row_breaks.append(Break(id=st["r"] - 1))  # 区分は必ずページ先頭から
         put(title + "（要約）", "0A66C2", None, white=True, bold=True, size=11, h=20)
         issue = str(summary.get(key + "_ISSUE", "") or "")
         prop = str(summary.get(key + "_PROPOSAL", "") or "")
         if not issue and not prop:
             # 旧形式(課題・提案が一体)の要約はそのまま1ブロックで出す
-            put_text(summary.get(key, ""), "FFFFFF")
+            put_section(summary.get(key, ""), "FFFFFF")
             continue
-        put("課題", "FDF6F6", "B42318", bold=True, size=10, h=15)
-        put_text(issue, "FDF6F6")
-        put("提案", "F2FBF3", "1A7F37", bold=True, size=10, h=15)
-        put_text(prop, "F2FBF3")
+        put_section(issue, "FDF6F6", "課題", "B42318")
+        put_section(prop, "F2FBF3", "提案", "1A7F37")
 
     ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
 
