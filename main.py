@@ -629,10 +629,11 @@ def setup_avg_sheet_print(wb):
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
 
-def build_ai_sheet(wb, results, layout="landscape"):
+def build_ai_sheet(wb, results, layout="landscape", summary=None):
     """AI診断シートに各AIの分析(報告書/販売/収支/資金の課題・提案)を貼る。
-       layout: "landscape"(横3列並列) / "portrait"(縦・各AIを全幅で縦積み・AIごと改ページ)
-       results が 1〜3個でも 0個でもエラーにしない。要約は貼らない。"""
+       AI自動要約があれば、各AIの右隣(3AIなら E列)に1列として並べる。
+       layout: "landscape"(横並列) / "portrait"(縦・全幅で縦積み・ブロックごと改ページ)
+       results が 1〜3個でも 0個でもエラーにしない。"""
     results = results or {}
     provs = [p for p in AI_SHEET_PROVS
              if isinstance(results.get(p), dict) and results[p].get("sections")]
@@ -643,6 +644,14 @@ def build_ai_sheet(wb, results, layout="landscape"):
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.properties import PageSetupProperties
     from openpyxl.worksheet.pagebreak import Break
+
+    # 表示する列: 各AI + (あれば)AI自動要約。
+    # 要約は分析と同じセクションキー(REPORT/SALES_ISSUE/…)を持つのでそのまま並べられる。
+    cols = [(AI_SHEET_HDR[p][0], AI_SHEET_HDR[p][1], results[p].get("sections") or {})
+            for p in provs]
+    summary = summary or {}
+    if any(str(summary.get(k) or "").strip() for k in SUMMARY_KEYMAP.values()):
+        cols.append(("AI自動要約", "6A4EA3", summary))
 
     FONT = "Yu Gothic"
     def _fill(c):
@@ -659,7 +668,7 @@ def build_ai_sheet(wb, results, layout="landscape"):
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
 
-    # ============ 縦向き・縦積み(各AIを全幅、AIごとに改ページ) ============
+    # ============ 縦向き・縦積み(各ブロックを全幅、ブロックごとに改ページ) ============
     if layout == "portrait":
         ws.page_setup.orientation = "portrait"
         ws.page_margins.left = ws.page_margins.right = 0.4
@@ -677,7 +686,7 @@ def build_ai_sheet(wb, results, layout="landscape"):
             c.font = _font(color=(fg or "2B2F33"), bold=bold, size=size, white=white)
             if wrap:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.row_dimensions[r].height = min(680, _est_lines(text, COLW) * 15 + 6)
+                ws.row_dimensions[r].height = min(400, _est_lines(text, COLW) * 15 + 6)
             else:
                 c.alignment = Alignment(vertical="center", horizontal=("center" if center else "left"))
                 ws.row_dimensions[r].height = h
@@ -685,14 +694,12 @@ def build_ai_sheet(wb, results, layout="landscape"):
             st["r"] = r + 1
 
         first = True
-        for p in provs:
+        for name, clr, sec in cols:
             if not first:
                 ws.row_dimensions[st["r"]].height = 8  # 余白
                 st["r"] += 1
-                ws.row_breaks.append(Break(id=st["r"] - 1))  # 新AIはページ先頭から
+                ws.row_breaks.append(Break(id=st["r"] - 1))  # 次のブロックはページ先頭から
             first = False
-            name, clr = AI_SHEET_HDR[p]
-            sec = results[p].get("sections") or {}
             put(name, clr, None, white=True, bold=True, size=14, h=26, center=True)
             put("経営談義報告書", "FFF8E1", "8D6E00", bold=True, size=10, h=16)
             put(sec.get("REPORT", "") or "", "FFF8E1", None, bold=False, wrap=True)
@@ -705,7 +712,7 @@ def build_ai_sheet(wb, results, layout="landscape"):
         ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
         return
 
-    # ============ 横向き・3列並列 ============
+    # ============ 横向き・列並列(各AI + AI自動要約) ============
     ws.page_setup.orientation = "landscape"
     ws.page_margins.left = ws.page_margins.right = 0.3
     ws.page_margins.top = ws.page_margins.bottom = 0.4
@@ -713,14 +720,14 @@ def build_ai_sheet(wb, results, layout="landscape"):
     COLW = 46
     start_col = 2
     ws.column_dimensions["A"].width = 1.5
-    for i, p in enumerate(provs):
+    for i in range(len(cols)):
         ws.column_dimensions[get_column_letter(start_col + i)].width = COLW
 
     state = {"r": 1}
 
     def label_row(text, bg, fg, white=False, h=18):
         r = state["r"]
-        for i, p in enumerate(provs):
+        for i in range(len(cols)):
             c = ws.cell(r, start_col + i, text)
             c.fill = _fill(bg)
             c.font = _font(color=(fg or "2B2F33"), bold=True, size=10, white=white)
@@ -732,20 +739,20 @@ def build_ai_sheet(wb, results, layout="landscape"):
     def text_row(section_key, bg):
         r = state["r"]
         maxlines = 1
-        for i, p in enumerate(provs):
-            txt = (results[p].get("sections") or {}).get(section_key, "") or ""
+        for i, (_name, _clr, sec) in enumerate(cols):
+            txt = sec.get(section_key, "") or ""
             c = ws.cell(r, start_col + i, txt)
             c.fill = _fill(bg)
             c.font = _font(size=10)
             c.alignment = Alignment(wrap_text=True, vertical="top")
             c.border = border
             maxlines = max(maxlines, _est_lines(txt, COLW))
-        ws.row_dimensions[r].height = min(640, maxlines * 15 + 6)
+        # Excel の行高上限は 409pt。超える指定は無視されて末尾が印刷されないため抑える
+        ws.row_dimensions[r].height = min(400, maxlines * 15 + 6)
         state["r"] = r + 1
 
     r = state["r"]
-    for i, p in enumerate(provs):
-        name, clr = AI_SHEET_HDR[p]
+    for i, (name, clr, _sec) in enumerate(cols):
         c = ws.cell(r, start_col + i, name)
         c.fill = _fill(clr)
         c.font = _font(white=True, bold=True, size=12)
@@ -763,7 +770,8 @@ def build_ai_sheet(wb, results, layout="landscape"):
         label_row("提案", "F2FBF3", "1A7F37", h=15)
         text_row(key + "_PROPOSAL", "F2FBF3")
 
-    last_col = get_column_letter(start_col + len(provs) - 1)
+    last_col = get_column_letter(start_col + len(cols) - 1)
+    ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
     ws.print_area = "A1:%s%d" % (last_col, state["r"] - 1)
 
 # ---- AI診断要約シート (AI自動要約を AI診断 の隣に。画面配色を踏襲) -------
@@ -877,7 +885,9 @@ def excel_route():
         return jsonify({"status": "NG", "error": "report.financials.rows がありません"}), 400
 
     import openpyxl
-    wb = openpyxl.load_workbook(TEMPLATE_PATH, data_only=False, keep_vba=True)
+    # 雛形は xlsm だがマクロ(「別ファイル保存」ボタン)は本機能では使わないため、
+    # keep_vba=False で読み込み、マクロ無しの xlsx として返す。
+    wb = openpyxl.load_workbook(TEMPLATE_PATH, data_only=False, keep_vba=False)
     ws = wb[EXCEL_SHEET]
 
     # ヘッダー
@@ -913,11 +923,11 @@ def excel_route():
         if r.get("v_prev2") not in (None, ""):
             ws["K%d" % rn] = r.get("v_prev2")
 
-    # AI診断シート(3AI分析を貼る。1〜3個でもエラーにしない。要約は貼らない)
+    # AI診断シート(3AI分析 + AI自動要約を列で並べる。1〜3個でもエラーにしない)
     layout = body.get("layout")
     if layout not in ("portrait", "landscape"):
         layout = "portrait"  # 既定: 縦向き・縦積み
-    build_ai_sheet(wb, body.get("results"), layout)
+    build_ai_sheet(wb, body.get("results"), layout, body.get("summary"))
 
     # AI診断要約シート(AI自動要約を AI診断 の隣に。内容が無ければ作らない)
     build_summary_sheet(wb, body.get("summary"))
@@ -932,9 +942,9 @@ def excel_route():
     # ファイル名(Disposition)は呼出側(.do)で付与する想定。ここは本文のみ返す。
     return send_file(
         bio,
-        mimetype="application/vnd.ms-excel.sheet.macroEnabled.12",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=False,
-        download_name="keieidangi.xlsm",
+        download_name="keieidangi.xlsx",
     )
 
 
