@@ -379,6 +379,32 @@ SUMMARY_SECTIONS = (["SUM_REPORT"]
 SUMMARY_MARKER_RE = re.compile(r"===\s*(" + "|".join(SUMMARY_SECTIONS) + r")\s*===")
 SUMMARY_KEYMAP = dict((s, s[4:]) for s in SUMMARY_SECTIONS)   # "SUM_" を落としたものがキー
 
+# 出力にAI名や「AI間の見解差」等が混じった場合に取り除くための保険。
+# 読み手(店舗の経営者・担当者)にとって、どのAIが何を言ったかは意味を持たないため。
+# プロンプトでも禁止しているが、守られないことがあるので後段でも落とす。
+# ※ 「AI」単体は業務上の提案("AIツールの活用"など)で正当に使うため対象にしない。
+_PROVIDER_WORDS = ("Claude", "claude", "CLAUDE", "Gemini", "gemini", "GEMINI",
+                   "OpenAI", "openai", "OPENAI", "ChatGPT", "Anthropic",
+                   "AI間", "各AI", "各生成AI", "3つのAI", "３つのAI", "三つのAI",
+                   "生成AIの", "AIごと", "他のAI")
+
+def scrub_provider_mentions(text):
+    """AI名・AI間の比較に言及した文を落とす。行全体が該当する場合は行ごと除去。"""
+    if not text:
+        return text
+    keep_lines = []
+    for line in text.split("\n"):
+        if any(w in line for w in _PROVIDER_WORDS):
+            sentences = [s for s in re.split(r"(?<=[。！？])", line) if s.strip()]
+            if not sentences:
+                continue
+            line = "".join(s for s in sentences
+                           if not any(w in s for w in _PROVIDER_WORDS))
+            if not line.strip() or line.strip() in ("・", "-", "*", "※"):
+                continue
+        keep_lines.append(line)
+    return "\n".join(keep_lines).strip()
+
 def split_summary(text):
     out = dict((k, "") for k in SUMMARY_KEYMAP.values())
     out["REPORT"] = ""
@@ -386,7 +412,7 @@ def split_summary(text):
         return out
     matches = list(SUMMARY_MARKER_RE.finditer(text))
     if not matches:
-        out["REPORT"] = text.strip()
+        out["REPORT"] = scrub_provider_mentions(text)
         return out
     for i, m in enumerate(matches):
         start = m.end()
@@ -396,24 +422,34 @@ def split_summary(text):
     for c in SUMMARY_CATS:
         if out.get(c) and not out.get(c + "_ISSUE") and not out.get(c + "_PROPOSAL"):
             out[c + "_ISSUE"] = out[c]
+    # AI名や「AI間の見解差」への言及が残っていれば除去する(保険)
+    for k in list(out.keys()):
+        out[k] = scrub_provider_mentions(out[k])
     return out
 
 # 内蔵の要約プロンプト。外部ファイル(zaiTask の summaryprompt)が無い場合に使う。
 # ※ 資材の kr2pmrpcm3pbh6rd655hprompt/summaryprompt と同一内容を保つこと。
 SUMMARY_PROMPT_TEMPLATE = """\
-あなたは複数の生成AIが作成した経営分析をレビューする上級経営コンサルタントです。
-同じ財務データに対して各AIが作成した『経営分析』を比較・統合し、
-経営談義の場でそのまま配布・議論できる詳細な『検討資料』を、販売・収支・資金それぞれの
-『課題』と『提案』に分けて日本語で作成してください。
-（分析が存在するAIのみを対象。AIは1〜3個のいずれの場合もある）
+あなたは中小企業の経営を支援する上級経営コンサルタントです。
+提示された複数の分析結果を比較・統合し、経営談義の場でそのまま配布・議論できる
+『検討資料』を、販売・収支・資金それぞれの『課題』と『提案』に分けて日本語で作成してください。
+（提示される分析は1〜3件のいずれの場合もある）
 
 【表現ルール — 100%遵守すること】
 {tone}
 
-【分量 — 最重要。必ず守ること】
-・要約と称して短くしないこと。各AIの記述を圧縮するのではなく、統合したうえで大幅に掘り下げること。
-・===SUM_REPORT=== は 2400〜3600文字。7〜10段落に分けて記述する。
-・各『課題』『提案』は箇条書きで12〜18点。1点あたり200〜350文字の小段落として記述する。
+【禁止事項 — 絶対に守ること】
+・「Claude」「Gemini」「OpenAI」「ChatGPT」などの固有名を一切出さないこと。
+・「各AIの分析では」「AI間の見解差」「3つのAIが」など、
+  複数のAIで分析していることが分かる表現を一切使わないこと。
+・分析の作られ方（誰が・どのツールが分析したか）には触れないこと。
+・読み手は店舗の経営者・担当者である。読み手にとって意味を持つのは分析の中身だけである。
+・見方が分かれる論点は、出典に触れず「〜という見方もある」等、内容として統合して述べること。
+
+【分量】
+・要約と称して短くしないこと。提示された分析を統合したうえで掘り下げること。
+・===SUM_REPORT=== は 1200〜1800文字。4〜5段落に分けて記述する。
+・各『課題』『提案』は箇条書きで8〜12点。1点あたり150〜250文字の小段落として記述する。
 ・『課題』の各点には次の3要素を必ず含める。
     (1) 該当する数値（金額・比率・日数・前期比・全国平均との差）
     (2) その数値が事業に与える影響
@@ -423,10 +459,9 @@ SUMMARY_PROMPT_TEMPLATE = """\
     (2) 実行手順（誰が・何を・どの順番で）
     (3) 到達目標の数値
     (4) 実施期限の目安
-・各AIに共通する指摘は1点に統合し、1つのAIしか触れていない指摘も重要であれば必ず拾うこと。
-・各AIの指摘を拾い切っても点数が足りない場合は、財務データから読み取れる論点を自分で追加すること。
+・提示された分析で重複する指摘は1点に統合し、1件にしか出てこない指摘も重要であれば必ず拾うこと。
+・それでも点数が足りない場合は、財務データから読み取れる論点を自分で追加すること。
   （例：3期の推移、全国平均との乖離、回転日数のバランス、損益分岐点、資金繰りの余力 など）
-・AI間で結論が食い違う点は、その区分の末尾に「※AI間の見解差：…」として2〜3点で明記する。
 ・「特になし」「同上」「前述のとおり」などで省略しないこと。全区分を最後まで書き切ること。
 ・同じ内容を言い換えただけの水増しはしないこと。各点は必ず異なる論点を扱うこと。
 
@@ -436,31 +471,31 @@ SUMMARY_PROMPT_TEMPLATE = """\
 ※ マーカー行(===SUM_REPORT=== / ===SUM_SALES_ISSUE=== / ===SUM_SALES_PROPOSAL=== / ===SUM_INCOME_ISSUE=== / ===SUM_INCOME_PROPOSAL=== / ===SUM_CAPITAL_ISSUE=== / ===SUM_CAPITAL_PROPOSAL===)は変更・削除しないでください。出力の解析に使用します。
 
 ===SUM_REPORT===
-(全体状況のまとめ。各AIの見解を統合し、3期の業績推移・キーメッセージ・重要な数値・
- 全国平均との比較・資金繰りの見通し・AI間の見解差を含めて2400〜3600文字。7〜10段落に分ける)
+(全体状況のまとめ。3期の業績推移・キーメッセージ・重要な数値・全国平均との比較・
+ 資金繰りの見通しを含めて1200〜1800文字。4〜5段落に分ける)
 
 ===SUM_SALES_ISSUE===
-(販売の課題を統合。箇条書き12〜18点。販売高/平均月商/ペイライン/従業員生産性の観点)
+(販売の課題。箇条書き8〜12点。販売高/平均月商/ペイライン/従業員生産性の観点)
 
 ===SUM_SALES_PROPOSAL===
-(販売の提案を統合。課題に対応する具体的な改善アクション。箇条書き12〜18点)
+(販売の提案。課題に対応する具体的な改善アクション。箇条書き8〜12点)
 
 ===SUM_INCOME_ISSUE===
-(収支の課題を統合。箇条書き12〜18点。粗利率・管理経費率・営業利益率・支払利息に言及)
+(収支の課題。箇条書き8〜12点。粗利率・管理経費率・営業利益率・支払利息に言及)
 
 ===SUM_INCOME_PROPOSAL===
-(収支の提案を統合。課題に対応する改善アクション。箇条書き12〜18点)
+(収支の提案。課題に対応する改善アクション。箇条書き8〜12点)
 
 ===SUM_CAPITAL_ISSUE===
-(資金の課題を統合。箇条書き12〜18点。現預金日数・売掛/棚卸/借入日数・自己資本に言及)
+(資金の課題。箇条書き8〜12点。現預金日数・売掛/棚卸/借入日数・自己資本に言及)
 
 ===SUM_CAPITAL_PROPOSAL===
-(資金の提案を統合。課題に対応する改善アクション。箇条書き12〜18点)
+(資金の提案。課題に対応する改善アクション。箇条書き8〜12点)
 
 【財務データ】
 {fin}
 
-【各AIの分析】
+【分析結果】
 {analyses}
 """
 
