@@ -579,6 +579,51 @@ def _est_lines(text, width):
         total += max(1, -(-dl // max(1, int(width))))
     return max(1, total)
 
+_EXTERNAL_REF_RE = re.compile(r"\[\d+\]")
+
+def freeze_external_links(wb, template_path):
+    """外部ブックを参照する数式を、雛形に保存されている値(キャッシュ)に置き換え、
+       外部リンクをブックから削除する。
+
+       雛形の「貼り付けデータ」シートは PMJ 社内 SharePoint 上のファイル
+       (RFM客層一覧表・人材情報)を約37,000個の数式で参照している。
+       openpyxl で xlsx として保存すると外部リンク部分が Excel 非互換の形で
+       書き直され、開くたびに「一部の内容に問題が見つかりました」の修復が出る。
+       また、参照先は社外からは開けないため、リンクを残す意味もない。
+       値は雛形保存時点のもの(=これまで表示されていた値)をそのまま使う。
+    """
+    if not getattr(wb, "_external_links", None):
+        return 0
+    import openpyxl
+    cached = openpyxl.load_workbook(template_path, data_only=True, read_only=True)
+    replaced = 0
+    try:
+        for ws in wb.worksheets:
+            targets = {}
+            for row in ws.iter_rows():
+                for c in row:
+                    v = c.value
+                    if isinstance(v, str) and v.startswith("=") and _EXTERNAL_REF_RE.search(v):
+                        targets[(c.row, c.column)] = c
+            if not targets or ws.title not in cached.sheetnames:
+                continue
+            cws = cached[ws.title]
+            for r_idx, row in enumerate(cws.iter_rows(values_only=True), start=1):
+                for c_idx, val in enumerate(row, start=1):
+                    cell = targets.get((r_idx, c_idx))
+                    if cell is not None:
+                        cell.value = val
+                        replaced += 1
+            # キャッシュが読めず残ったもの(通常は無い)は空にする
+            for cell in targets.values():
+                if isinstance(cell.value, str) and cell.value.startswith("=") \
+                        and _EXTERNAL_REF_RE.search(cell.value):
+                    cell.value = None
+    finally:
+        cached.close()
+    wb._external_links = []
+    return replaced
+
 def fix_report_print_area(wb, ws):
     """報告書シートの印刷範囲を復元する。
 
@@ -940,6 +985,9 @@ def excel_route():
     # 雛形は xlsm だがマクロ(「別ファイル保存」ボタン)は本機能では使わないため、
     # keep_vba=False で読み込み、マクロ無しの xlsx として返す。
     wb = openpyxl.load_workbook(TEMPLATE_PATH, data_only=False, keep_vba=False)
+    # 外部ブック参照(PMJ社内SharePoint)を値に固定し、外部リンクを削除する。
+    # 残したまま xlsx 保存すると、開くたびに Excel の修復ダイアログが出るため。
+    freeze_external_links(wb, TEMPLATE_PATH)
     ws = wb[EXCEL_SHEET]
 
     # ヘッダー
