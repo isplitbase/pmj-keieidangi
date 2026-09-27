@@ -974,6 +974,32 @@ def build_summary_sheet(wb, summary):
 
     ws.print_area = "A1:%s%d" % (get_column_letter(COL), st["r"] - 1)
 
+# ---- 作業用シートの非表示 -------------------------------------------------
+# ユーザーに見せるのは 報告書 / AI診断 / AI診断要約 の3枚だけにする。
+# 残りはデータ用・作業用なので非表示にする(削除はしない):
+#   Sheet1        … 旧「地区平均」用の作業シート。現在どこからも参照されていない
+#   店別ランク      … Sheet1 からのみ参照
+#   平均粗利益率・PH … Sheet1 からのみ参照
+#   貼り付けデータ   … 報告書が28箇所で参照しているため削除は不可。
+#                    Excel は非表示シートも計算するので、非表示でも報告書は正しく出る。
+HIDDEN_SHEETS = ["Sheet1", "店別ランク", "平均粗利益率・PH", "貼り付けデータ"]
+
+def hide_work_sheets(wb):
+    """作業用シートを非表示にする。表示シートが無くならないように保険をかける。"""
+    for name in HIDDEN_SHEETS:
+        if name in wb.sheetnames:
+            wb[name].sheet_state = "hidden"
+    visible = [i for i, ws in enumerate(wb.worksheets) if ws.sheet_state == "visible"]
+    if not visible:                      # 万一すべて非表示になったら報告書を戻す
+        wb[EXCEL_SHEET].sheet_state = "visible"
+        visible = [wb.sheetnames.index(EXCEL_SHEET)]
+    # 選択中のシートが非表示だと Excel が警告を出すため、表示シートを選んでおく
+    try:
+        if wb.active is None or wb.active.sheet_state != "visible":
+            wb.active = visible[0]
+    except Exception:
+        wb.active = visible[0]
+
 @app.post("/excel")
 def excel_route():
     body = request.get_json(silent=True) or {}
@@ -1038,6 +1064,8 @@ def excel_route():
     # 印刷範囲の復元(雛形の INDIRECT 定義を openpyxl が保持できないため)
     fix_report_print_area(wb, ws)
     setup_avg_sheet_print(wb)
+    # 作業用シート(データ用)を非表示にして、ユーザーには3シートだけ見せる
+    hide_work_sheets(wb)
 
     bio = BytesIO()
     wb.save(bio)
